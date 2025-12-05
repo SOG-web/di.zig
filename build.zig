@@ -89,22 +89,6 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
-    // Benchmark executable
-    const bench_exe = b.addExecutable(.{
-        .name = "benchmark",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/benchmark.zig"),
-            .target = target,
-            .optimize = .ReleaseFast, // Always optimize benchmarks
-        }),
-    });
-    b.installArtifact(bench_exe);
-
-    // Benchmark step
-    const bench_step = b.step("bench", "Run benchmarks");
-    const run_bench = b.addRunArtifact(bench_exe);
-    bench_step.dependOn(&run_bench.step);
-
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
