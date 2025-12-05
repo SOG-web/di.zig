@@ -485,28 +485,7 @@ If circular dependencies are truly necessary, use `Lazy(T)` on the dependency th
 5. **Call `deinit()` on scopes** (use `defer`) to prevent resource leaks
 6. **Use `Lazy(T)` to break circular dependencies** - at least one side must be lazy
 
-## Benchmarks
 
-Run benchmarks with:
-
-```bash
-zig build bench
-```
-
-<!--### Sample Results (Apple Intel)
-
-| Operation | Avg Time | Ops/sec |
-|-----------|----------|---------|
-| Container init + deinit | 44 ns | 22.7M |
-| Register simple service | 74 ns | 13.5M |
-| Resolve singleton (cached) | 61 ns | 16.4M |
-| Resolve transient (new instance) | 9.2 µs | 109K |
-| Resolve with 2x Injected deps | 9.2 µs | 109K |
-| Resolve with 2x Lazy deps (no get) | 9.1 µs | 110K |
-| Resolve named singleton | 70 ns | 14.3M |
-| Resolve factory transient | 124 ns | 8.1M |
-| Scope create + destroy (empty) | 45 ns | 22.2M |
-| Resolve scoped (cached) | 73 ns | 13.7M |-->
 
 **Key Takeaways:**
 - Cached resolutions (singleton, scoped) are very fast (~60-75 ns)
