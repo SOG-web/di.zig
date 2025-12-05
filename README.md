@@ -376,25 +376,339 @@ const Connection = struct {
 };
 ```
 
-### `init(self: *Self) void`
+### `init` - Post-Injection Initialization
 
-Called after the instance is created and all dependencies are injected.
+Called after the instance is created and all dependencies are injected. The container supports multiple `init` signatures, including error-returning and factory-style variants.
+
+#### Supported Signatures
+
+##### `fn init() void` - Static initialization
 
 ```zig
-const Cache = struct {
-    data: std.StringHashMap([]const u8),
+const MetricsService = struct {
+    var instance_count: u32 = 0;
+    value: u32 = 0,
 
-    pub fn init(self: *Cache) void {
-        // Additional initialization after DI
-        self.warmup();
-    }
-
-    fn warmup(self: *Cache) void {
-        // Pre-populate cache...
-        _ = self;
+    pub fn init() void {
+        instance_count += 1; // Track total instances created
     }
 };
 ```
+
+##### `fn init() !void` - Static initialization that can fail
+
+```zig
+const ConfigLoader = struct {
+    var config_loaded: bool = false;
+    data: []const u8 = "",
+
+    pub fn init() !void {
+        if (config_loaded) return;
+        // Could fail during static setup
+        config_loaded = true;
+    }
+};
+```
+
+##### `fn init() T` - Factory returning new instance
+
+```zig
+const SimpleFactory = struct {
+    value: u32,
+    name: []const u8,
+
+    pub fn init() @This() {
+        return .{
+            .value = 42,
+            .name = "factory-created",
+        };
+    }
+};
+```
+
+##### `fn init() !T` - Factory returning new instance, can fail
+
+```zig
+const ValidatedService = struct {
+    config_valid: bool,
+
+    pub fn init() !@This() {
+        // Validation logic that might fail
+        if (!checkEnvironment()) return error.InvalidEnvironment;
+        return .{ .config_valid = true };
+    }
+};
+```
+
+##### `fn init(self: *T) void` - In-place initialization
+
+```zig
+const Counter = struct {
+    config: di.Injected(Config),
+    count: u32 = 0,
+
+    pub fn init(self: *@This()) void {
+        // Dependencies are available here
+        self.count = self.config.get().initial_count;
+    }
+};
+```
+
+##### `fn init(self: *T) !void` - In-place initialization that can fail
+
+```zig
+const ConnectionPool = struct {
+    logger: di.Injected(Logger),
+    connections: u32 = 0,
+
+    pub fn init(self: *@This()) !void {
+        self.logger.get().log("Initializing pool...");
+        self.connections = try self.createConnections();
+    }
+};
+```
+
+##### `fn init(allocator) void` - Static initialization with allocator
+
+```zig
+const SharedPool = struct {
+    var global_pool: ?*Pool = null;
+
+    pub fn init(allocator: std.mem.Allocator) void {
+        if (global_pool == null) {
+            global_pool = allocator.create(Pool) catch null;
+        }
+    }
+};
+```
+
+##### `fn init(allocator) !void` - Static initialization with allocator, can fail
+
+```zig
+const GlobalCache = struct {
+    var shared_buffer: ?[]u8 = null;
+
+    pub fn init(allocator: std.mem.Allocator) !void {
+        if (shared_buffer == null) {
+            shared_buffer = try allocator.alloc(u8, 4096);
+        }
+    }
+};
+```
+
+##### `fn init(allocator) T` - Factory with allocator
+
+```zig
+const BufferService = struct {
+    buffer: []u8,
+    allocator_ref: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) @This() {
+        return .{
+            .buffer = allocator.alloc(u8, 1024) catch &[_]u8{},
+            .allocator_ref = allocator,
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        if (self.buffer.len > 0) self.allocator_ref.free(self.buffer);
+    }
+};
+```
+
+##### `fn init(allocator) !T` - Factory with allocator, can fail (Most Common Factory Style)
+
+```zig
+const AuthService = struct {
+    allocator: std.mem.Allocator,
+    db: di.Injected(Database),      // Injected AFTER init returns
+    user_cache: Cache(AuthUser),
+
+    pub fn init(allocator: std.mem.Allocator) !@This() {
+        const user_cache = try Cache(AuthUser).init(allocator, .{
+            .max_size = 2000,
+        });
+        return .{
+            .allocator = allocator,
+            .db = undefined,  // Will be injected
+            .user_cache = user_cache,
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.user_cache.deinit();
+    }
+};
+```
+
+##### `fn init(self: *T, allocator) void` - Full in-place initialization
+
+```zig
+const DataProcessor = struct {
+    logger: di.Injected(Logger),
+    buffer: ?[]u8 = null,
+    allocator_ref: ?std.mem.Allocator = null,
+
+    pub fn init(self: *@This(), allocator: std.mem.Allocator) void {
+        self.allocator_ref = allocator;
+        self.buffer = allocator.alloc(u8, 512) catch null;
+        // Dependencies available
+        self.logger.get().log("DataProcessor ready");
+    }
+
+    pub fn deinit(self: *@This()) void {
+        if (self.buffer) |b| {
+            if (self.allocator_ref) |a| a.free(b);
+        }
+    }
+};
+```
+
+##### `fn init(self: *T, allocator) !void` - Full in-place initialization, can fail
+
+```zig
+const SecureService = struct {
+    config: di.Injected(Config),
+    keys: ?[]u8 = null,
+    allocator_ref: ?std.mem.Allocator = null,
+
+    pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
+        self.allocator_ref = allocator;
+        // Dependencies are available
+        const key_size = self.config.get().key_size;
+        self.keys = try allocator.alloc(u8, key_size);
+        try self.loadKeys();
+    }
+
+    pub fn deinit(self: *@This()) void {
+        if (self.keys) |k| {
+            if (self.allocator_ref) |a| a.free(k);
+        }
+    }
+};
+```
+
+#### Summary Table
+
+| Signature | Style | Dependencies Available In `init` |
+|-----------|-------|----------------------------------|
+| `fn init() void` | Static | No |
+| `fn init() !void` | Static | No |
+| `fn init() T` | Factory | No (injected after) |
+| `fn init() !T` | Factory | No (injected after) |
+| `fn init(self: *T) void` | In-place | Yes |
+| `fn init(self: *T) !void` | In-place | Yes |
+| `fn init(allocator) void` | Static | No |
+| `fn init(allocator) !void` | Static | No |
+| `fn init(allocator) T` | Factory | No (injected after) |
+| `fn init(allocator) !T` | Factory | No (injected after) |
+| `fn init(self: *T, allocator) void` | In-place | Yes |
+| `fn init(self: *T, allocator) !void` | In-place | Yes |
+
+#### In-place Initialization (Most Common)
+
+Modify the instance after dependencies are injected. Dependencies are available inside `init`:
+
+```zig
+const Cache = struct {
+    config: di.Injected(Config),
+    data: ?std.StringHashMap([]const u8) = null,
+
+    pub fn init(self: *Cache) !void {
+        // Dependencies are available here
+        const size = self.config.get().cache_size;
+        self.data = try self.initHashMap(size);
+    }
+};
+```
+
+#### Factory-style Initialization
+
+For services with complex construction, `init` can return a new instance. Dependencies are injected **after** the factory returns:
+
+```zig
+const AuthService = struct {
+    allocator: std.mem.Allocator,
+    db: di.Injected(Database),      // Injected AFTER init returns
+    jwt: di.Injected(JwtService),   // Injected AFTER init returns
+    user_cache: Cache(AuthUser),
+
+    pub fn init(allocator: std.mem.Allocator) !AuthService {
+        // Create cache and other resources
+        const user_cache = try Cache(AuthUser).init(allocator, .{
+            .max_size = 2000,
+            .segment_count = 8,
+        });
+
+        return AuthService{
+            .allocator = allocator,
+            .db = undefined,         // Will be injected
+            .jwt = undefined,        // Will be injected
+            .user_cache = user_cache,
+        };
+    }
+
+    pub fn deinit(self: *AuthService) void {
+        self.user_cache.deinit();
+    }
+};
+
+// Just register normally - no need for registerFactory!
+try container.register(AuthService, .singleton);
+```
+
+#### Error Handling
+
+Errors from `init` propagate to the caller of `resolve`:
+
+```zig
+const DatabaseService = struct {
+    connection: *Connection,
+
+    pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
+        self.connection = try Connection.open(allocator, "db://localhost");
+    }
+};
+
+// Error propagates from init
+const db = container.resolve(DatabaseService) catch |err| {
+    std.log.err("Failed to initialize database: {}", .{err});
+    return err;
+};
+```
+
+#### Full Initialization with Allocator
+
+For services that need both instance access and allocator:
+
+```zig
+const BufferedService = struct {
+    logger: di.Injected(Logger),
+    buffer: ?[]u8 = null,
+    allocator_ref: ?std.mem.Allocator = null,
+
+    pub fn init(self: *@This(), allocator: std.mem.Allocator) !void {
+        self.allocator_ref = allocator;
+        self.buffer = try allocator.alloc(u8, 1024);
+        // Injected dependencies are available
+        self.logger.get().log("BufferedService initialized");
+    }
+
+    pub fn deinit(self: *@This()) void {
+        if (self.buffer) |b| {
+            if (self.allocator_ref) |alloc| {
+                alloc.free(b);
+            }
+        }
+    }
+};
+```
+
+**Key Points:**
+- **In-place init** (`self: *T`): Dependencies are injected **before** `init` is called, so they're accessible inside `init`
+- **Factory-style init** (returns `T`): Dependencies are injected **after** `init` returns
+- **Static init** (no `self`): No instance access, useful for global/shared state setup
+- Error-returning variants (`!void`, `!T`) propagate errors to the `resolve` caller
 
 ## Named Registrations
 

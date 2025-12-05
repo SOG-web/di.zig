@@ -382,19 +382,72 @@ pub const Container = struct {
         // Start with default values if available
         instance.* = getDefaults(T);
 
-        // Inject dependencies into marked fields (we're already locked for singletons)
-        try self.injectFieldsInternal(T, instance);
+        // Track if init returns T (factory-style) - needs re-injection after
+        var needs_reinjection = false;
 
-        // Call init if it exists and takes *Self
+        // Call init if it exists
         if (@hasDecl(T, "init")) {
             const InitFn = @TypeOf(T.init);
             const init_info = @typeInfo(InitFn);
             if (init_info == .@"fn") {
                 const params = init_info.@"fn".params;
-                if (params.len == 1 and params[0].type == *T) {
-                    T.init(instance);
+                const ReturnType = init_info.@"fn".return_type.?;
+
+                // Check if return type is an error union
+                const return_type_info = @typeInfo(ReturnType);
+                const is_error_union = return_type_info == .error_union;
+                const PayloadType = if (is_error_union) return_type_info.error_union.payload else ReturnType;
+
+                // Determine if it returns T (factory-style) or void
+                const returns_t = PayloadType == T;
+
+                // For init that takes *T, inject dependencies BEFORE init so they're accessible
+                const takes_self = (params.len >= 1 and params[0].type == *T);
+                if (takes_self) {
+                    try self.injectFieldsInternal(T, instance);
+                }
+
+                if (params.len == 0) {
+                    if (returns_t) {
+                        instance.* = if (is_error_union) try T.init() else T.init();
+                        needs_reinjection = true;
+                    } else {
+                        if (is_error_union) try T.init() else T.init();
+                    }
+                } else if (params.len == 1 and params[0].type == *T) {
+                    if (returns_t) {
+                        instance.* = if (is_error_union) try T.init(instance) else T.init(instance);
+                        needs_reinjection = true;
+                    } else {
+                        if (is_error_union) try T.init(instance) else T.init(instance);
+                    }
+                } else if (params.len == 1 and params[0].type == std.mem.Allocator) {
+                    if (returns_t) {
+                        instance.* = if (is_error_union) try T.init(self.allocator) else T.init(self.allocator);
+                    } else {
+                        if (is_error_union) try T.init(self.allocator) else T.init(self.allocator);
+                    }
+                    // Always inject after allocator-only init (no self access)
+                    needs_reinjection = true;
+                } else if (params.len == 2 and params[0].type == *T and params[1].type == std.mem.Allocator) {
+                    if (returns_t) {
+                        instance.* = if (is_error_union) try T.init(instance, self.allocator) else T.init(instance, self.allocator);
+                        needs_reinjection = true;
+                    } else {
+                        if (is_error_union) try T.init(instance, self.allocator) else T.init(instance, self.allocator);
+                    }
+                } else {
+                    @compileError("Unsupported init function signature for type: " ++ @typeName(T));
                 }
             }
+        } else {
+            // No init function, just inject dependencies
+            needs_reinjection = true;
+        }
+
+        // Inject/re-inject dependencies if needed
+        if (needs_reinjection) {
+            try self.injectFieldsInternal(T, instance);
         }
 
         return instance;
