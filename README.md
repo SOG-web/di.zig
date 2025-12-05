@@ -201,21 +201,95 @@ try container.registerFactory(Database, .singleton, struct {
 }.create);
 ```
 
-## Instance Registration
+## Services with Custom Initialization
 
-Register an externally-created instance:
+When your service has custom initialization logic (like setting up caches, connection pools, or other resources), use `registerFactory` to register it as a singleton:
 
 ```zig
-var config = Config{
-    .port = 8080,
-    .host = "localhost",
+const AuthService = struct {
+    allocator: std.mem.Allocator,
+    db: di.Injected(pg.Pool),
+    jwt: di.Injected(JwtService),
+    config: di.Injected(Config),
+    user_cache: Cache(AuthUser),
+
+    pub fn init(allocator: std.mem.Allocator) !AuthService {
+        // Initialize cache for auth users (5 minute TTL, max 2000 users)
+        const user_cache = try Cache(AuthUser).init(allocator, .{
+            .max_size = 2000,
+            .segment_count = 8,
+        });
+
+        return AuthService{
+            .allocator = allocator,
+            .user_cache = user_cache,
+        };
+    }
+
+    pub fn deinit(self: *AuthService) void {
+        self.user_cache.deinit();
+    }
 };
 
-try container.registerInstance(Config, &config);
+// Register with a factory to handle custom initialization
+try container.registerFactory(AuthService, .singleton, struct {
+    fn create(c: *di.Container) !*AuthService {
+        const auth_service = try c.allocator.create(AuthService);
+        auth_service.* = try AuthService.init(c.allocator);
+        return auth_service;
+    }
+}.create);
+
+// Resolve and use - Injected fields (db, jwt, config) are automatically populated
+const auth = try container.resolve(AuthService);
+```
+
+**Key points:**
+- The factory calls your custom `init` function with any required parameters
+- `Injected(T)` fields are automatically populated by the container after the factory returns
+- The `deinit` method is called automatically when `container.deinit()` is invoked
+- Use `.singleton` to ensure only one instance exists throughout your application
+
+## Instance Registration
+
+Register an externally-created instance. Any `Injected(T)` or `Lazy(T)` fields will be automatically populated:
+
+```zig
+const Logger = struct {
+    prefix: []const u8 = "[LOG]",
+};
+
+const ServiceWithDeps = struct {
+    logger: di.Injected(Logger),
+    config: di.Lazy(Config),
+    custom_value: u32,
+};
+
+// Register dependencies first
+try container.register(Logger, .singleton);
+try container.register(Config, .singleton);
+
+// Create an instance externally with custom values
+var service = ServiceWithDeps{
+    .logger = undefined,     // Will be auto-injected
+    .config = undefined,     // Will be auto-injected
+    .custom_value = 42,      // Your custom initialization
+};
+
+try container.registerInstance(ServiceWithDeps, &service);
+
+// Resolve and use - all dependencies are injected
+const resolved = try container.resolve(ServiceWithDeps);
+resolved.logger.get().log("Hello");  // Works!
 
 // The container will NOT destroy this instance on deinit
 // (since it doesn't own it)
 ```
+
+**Key points:**
+- `Injected(T)` and `Lazy(T)` fields are automatically populated when registering
+- The container does NOT call `deinit` on externally-provided instances
+- The instance pointer must remain valid for the lifetime of the container
 
 ## Scoped Services Deep Dive
 

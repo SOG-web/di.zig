@@ -208,6 +208,9 @@ pub const Container = struct {
 
     /// Register an existing instance as a singleton with a custom name.
     pub fn registerInstanceNamed(self: *Container, comptime T: type, name: []const u8, instance: *T) !void {
+        // Inject Lazy/Injected fields into the provided instance
+        try self.injectFieldsInternal(T, instance);
+
         const entry = ServiceEntry{
             .create_fn = &makeCreateFn(T).create,
             .destroy_fn = null, // Don't destroy externally-provided instances
@@ -706,4 +709,50 @@ test "custom factory with lazy dependencies" {
     // Lazy dependency should work
     const heavy = try service.heavy.get();
     try std.testing.expect(heavy.initialized);
+}
+
+test "register instance with injected dependencies" {
+    const allocator = std.testing.allocator;
+
+    const Logger = struct {
+        prefix: []const u8 = "[LOG]",
+    };
+
+    const ServiceWithDeps = struct {
+        logger: Injected(Logger),
+        lazy_logger: Lazy(Logger),
+        custom_value: u32,
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    // Register the dependency
+    try container.register(Logger, .singleton);
+
+    // Create an instance externally with a custom value
+    var service = ServiceWithDeps{
+        .logger = undefined, // Will be injected
+        .lazy_logger = undefined, // Will be injected
+        .custom_value = 42,
+    };
+
+    // Register the existing instance - should inject dependencies
+    try container.registerInstance(ServiceWithDeps, &service);
+
+    // Resolve and verify
+    const resolved = try container.resolve(ServiceWithDeps);
+
+    // Should be the same instance
+    try std.testing.expectEqual(&service, resolved);
+
+    // Custom value should be preserved
+    try std.testing.expectEqual(@as(u32, 42), resolved.custom_value);
+
+    // Injected dependency should be populated
+    try std.testing.expectEqualStrings("[LOG]", resolved.logger.get().prefix);
+
+    // Lazy dependency should also work
+    const lazy_logger = try resolved.lazy_logger.get();
+    try std.testing.expectEqualStrings("[LOG]", lazy_logger.prefix);
 }
