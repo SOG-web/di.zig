@@ -313,7 +313,7 @@ pub const Container = struct {
                 } else try self.buildInstanceInternal(T);
                 return new;
             },
-            .scoped => return error.ScopedNotImplemented,
+            .scoped => return error.UseAScopedResolver,
         }
     }
 

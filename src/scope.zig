@@ -221,10 +221,6 @@ pub const Scope = struct {
     }
 };
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 test "scoped services are shared within scope" {
     const allocator = std.testing.allocator;
 
