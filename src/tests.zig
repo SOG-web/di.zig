@@ -842,3 +842,588 @@ test "scope instances are destroyed on deinit" {
 
     // If we get here without memory leak errors, destruction worked
 }
+
+// ============================================================================
+// Tests for init function signatures
+// ============================================================================
+
+test "init with no parameters" {
+    const allocator = std.testing.allocator;
+
+    // Static counter to track if init was called
+    const ServiceWithStaticInit = struct {
+        var init_called: bool = false;
+
+        value: u32 = 100,
+
+        pub fn init() void {
+            init_called = true;
+        }
+    };
+
+    // Reset static state
+    ServiceWithStaticInit.init_called = false;
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithStaticInit, .singleton);
+
+    const service = try container.resolve(ServiceWithStaticInit);
+
+    // init() should have been called
+    try std.testing.expect(ServiceWithStaticInit.init_called);
+    // Default value should be preserved
+    try std.testing.expectEqual(@as(u32, 100), service.value);
+}
+
+test "init with self pointer" {
+    const allocator = std.testing.allocator;
+
+    const ServiceWithSelfInit = struct {
+        value: u32 = 0,
+        initialized: bool = false,
+
+        pub fn init(self: *@This()) void {
+            self.value = 42;
+            self.initialized = true;
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithSelfInit, .singleton);
+
+    const service = try container.resolve(ServiceWithSelfInit);
+
+    // init(self) should have modified the instance
+    try std.testing.expect(service.initialized);
+    try std.testing.expectEqual(@as(u32, 42), service.value);
+}
+
+test "init with allocator only" {
+    const allocator = std.testing.allocator;
+
+    // Static to track init was called with an allocator
+    const ServiceWithAllocatorInit = struct {
+        var received_allocator: bool = false;
+
+        value: u32 = 200,
+
+        pub fn init(alloc: std.mem.Allocator) void {
+            // Just verify we received a valid allocator by checking it's usable
+            _ = alloc;
+            received_allocator = true;
+        }
+    };
+
+    // Reset static state
+    ServiceWithAllocatorInit.received_allocator = false;
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithAllocatorInit, .singleton);
+
+    const service = try container.resolve(ServiceWithAllocatorInit);
+
+    // init(allocator) should have been called
+    try std.testing.expect(ServiceWithAllocatorInit.received_allocator);
+    // Default value should be preserved
+    try std.testing.expectEqual(@as(u32, 200), service.value);
+}
+
+test "init with self and allocator" {
+    const allocator = std.testing.allocator;
+
+    const ServiceWithFullInit = struct {
+        data: ?[]u8 = null,
+        allocator_ref: ?std.mem.Allocator = null,
+        initialized: bool = false,
+
+        pub fn init(self: *@This(), alloc: std.mem.Allocator) void {
+            self.allocator_ref = alloc;
+            self.data = alloc.alloc(u8, 10) catch null;
+            self.initialized = true;
+        }
+
+        pub fn deinit(self: *@This()) void {
+            if (self.data) |d| {
+                if (self.allocator_ref) |alloc| {
+                    alloc.free(d);
+                }
+            }
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithFullInit, .singleton);
+
+    const service = try container.resolve(ServiceWithFullInit);
+
+    // init(self, allocator) should have modified the instance
+    try std.testing.expect(service.initialized);
+    try std.testing.expect(service.data != null);
+    try std.testing.expectEqual(@as(usize, 10), service.data.?.len);
+    try std.testing.expect(service.allocator_ref != null);
+}
+
+test "init with self pointer and injected dependencies" {
+    const allocator = std.testing.allocator;
+
+    const Config = struct {
+        base_value: u32 = 10,
+    };
+
+    const ServiceWithInitAndDeps = struct {
+        config: Injected(Config),
+        computed_value: u32 = 0,
+        init_called: bool = false,
+
+        pub fn init(self: *@This()) void {
+            // Access injected dependency during init
+            self.computed_value = self.config.get().base_value * 2;
+            self.init_called = true;
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(Config, .singleton);
+    try container.register(ServiceWithInitAndDeps, .singleton);
+
+    const service = try container.resolve(ServiceWithInitAndDeps);
+
+    // init should have been called after dependency injection
+    try std.testing.expect(service.init_called);
+    // computed_value should be based on injected config
+    try std.testing.expectEqual(@as(u32, 20), service.computed_value);
+}
+
+test "init with self and allocator plus injected dependencies" {
+    const allocator = std.testing.allocator;
+
+    const Logger = struct {
+        prefix: []const u8 = "[LOG]",
+    };
+
+    const ServiceWithEverything = struct {
+        logger: Injected(Logger),
+        buffer: ?[]u8 = null,
+        allocator_ref: ?std.mem.Allocator = null,
+        message: []const u8 = "",
+
+        pub fn init(self: *@This(), alloc: std.mem.Allocator) void {
+            self.allocator_ref = alloc;
+            self.buffer = alloc.alloc(u8, 64) catch null;
+            // Access injected dependency
+            self.message = self.logger.get().prefix;
+        }
+
+        pub fn deinit(self: *@This()) void {
+            if (self.buffer) |b| {
+                if (self.allocator_ref) |alloc| {
+                    alloc.free(b);
+                }
+            }
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(Logger, .singleton);
+    try container.register(ServiceWithEverything, .singleton);
+
+    const service = try container.resolve(ServiceWithEverything);
+
+    // Verify init was called with allocator
+    try std.testing.expect(service.buffer != null);
+    try std.testing.expect(service.allocator_ref != null);
+    // Verify injected dependency was accessible in init
+    try std.testing.expectEqualStrings("[LOG]", service.message);
+}
+
+// ============================================================================
+// Tests for init functions that return values (error unions and factory-style)
+// ============================================================================
+
+test "init with self pointer returning error union" {
+    const allocator = std.testing.allocator;
+
+    const ServiceWithFallibleInit = struct {
+        value: u32 = 0,
+        initialized: bool = false,
+
+        pub fn init(self: *@This()) !void {
+            self.value = 99;
+            self.initialized = true;
+            // Could return an error here in real code
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithFallibleInit, .singleton);
+
+    const service = try container.resolve(ServiceWithFallibleInit);
+
+    try std.testing.expect(service.initialized);
+    try std.testing.expectEqual(@as(u32, 99), service.value);
+}
+
+test "init with self and allocator returning error union" {
+    const allocator = std.testing.allocator;
+
+    const ServiceWithFallibleFullInit = struct {
+        data: ?[]u8 = null,
+        allocator_ref: ?std.mem.Allocator = null,
+
+        pub fn init(self: *@This(), alloc: std.mem.Allocator) !void {
+            self.allocator_ref = alloc;
+            self.data = try alloc.alloc(u8, 32);
+        }
+
+        pub fn deinit(self: *@This()) void {
+            if (self.data) |d| {
+                if (self.allocator_ref) |alloc| {
+                    alloc.free(d);
+                }
+            }
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithFallibleFullInit, .singleton);
+
+    const service = try container.resolve(ServiceWithFallibleFullInit);
+
+    try std.testing.expect(service.data != null);
+    try std.testing.expectEqual(@as(usize, 32), service.data.?.len);
+}
+
+test "factory-style init returning T" {
+    const allocator = std.testing.allocator;
+
+    const FactoryService = struct {
+        value: u32,
+        name: []const u8,
+
+        pub fn init() @This() {
+            return .{
+                .value = 123,
+                .name = "factory-created",
+            };
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(FactoryService, .singleton);
+
+    const service = try container.resolve(FactoryService);
+
+    try std.testing.expectEqual(@as(u32, 123), service.value);
+    try std.testing.expectEqualStrings("factory-created", service.name);
+}
+
+test "factory-style init with allocator returning T" {
+    const allocator = std.testing.allocator;
+
+    const FactoryWithAllocator = struct {
+        buffer: []u8,
+        allocator_ref: std.mem.Allocator,
+
+        pub fn init(alloc: std.mem.Allocator) @This() {
+            return .{
+                .buffer = alloc.alloc(u8, 64) catch &[_]u8{},
+                .allocator_ref = alloc,
+            };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            if (self.buffer.len > 0) {
+                self.allocator_ref.free(self.buffer);
+            }
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(FactoryWithAllocator, .singleton);
+
+    const service = try container.resolve(FactoryWithAllocator);
+
+    try std.testing.expectEqual(@as(usize, 64), service.buffer.len);
+}
+
+test "factory-style init with allocator returning error union !T" {
+    const allocator = std.testing.allocator;
+
+    const FallibleFactory = struct {
+        data: []u8,
+        allocator_ref: std.mem.Allocator,
+
+        pub fn init(alloc: std.mem.Allocator) !@This() {
+            const data = try alloc.alloc(u8, 128);
+            return .{
+                .data = data,
+                .allocator_ref = alloc,
+            };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.allocator_ref.free(self.data);
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(FallibleFactory, .singleton);
+
+    const service = try container.resolve(FallibleFactory);
+
+    try std.testing.expectEqual(@as(usize, 128), service.data.len);
+}
+
+test "factory-style init with injected dependencies" {
+    const allocator = std.testing.allocator;
+
+    const Config = struct {
+        buffer_size: usize = 256,
+    };
+
+    const FactoryWithDeps = struct {
+        config: Injected(Config),
+        buffer: []u8,
+        allocator_ref: std.mem.Allocator,
+
+        pub fn init(alloc: std.mem.Allocator) !@This() {
+            // Note: config is NOT available here since this is factory-style
+            // It will be injected AFTER init returns
+            const buffer = try alloc.alloc(u8, 64);
+            return .{
+                .config = undefined, // Will be injected after
+                .buffer = buffer,
+                .allocator_ref = alloc,
+            };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.allocator_ref.free(self.buffer);
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(Config, .singleton);
+    try container.register(FactoryWithDeps, .singleton);
+
+    const service = try container.resolve(FactoryWithDeps);
+
+    // Factory created the buffer
+    try std.testing.expectEqual(@as(usize, 64), service.buffer.len);
+    // Injected dependency should be populated after factory returned
+    try std.testing.expectEqual(@as(usize, 256), service.config.get().buffer_size);
+}
+
+test "init returning error propagates correctly" {
+    const allocator = std.testing.allocator;
+
+    const FailingService = struct {
+        pub fn init(self: *@This()) !void {
+            _ = self;
+            return error.InitializationFailed;
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(FailingService, .singleton);
+
+    const result = container.resolve(FailingService);
+    try std.testing.expectError(error.InitializationFailed, result);
+}
+
+test "factory-style init returning error propagates correctly" {
+    const allocator = std.testing.allocator;
+
+    const FailingFactory = struct {
+        value: u32,
+
+        pub fn init(alloc: std.mem.Allocator) !@This() {
+            _ = alloc;
+            return error.FactoryFailed;
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(FailingFactory, .singleton);
+
+    const result = container.resolve(FailingFactory);
+    try std.testing.expectError(error.FactoryFailed, result);
+}
+
+test "init with self pointer returning T" {
+    const allocator = std.testing.allocator;
+
+    const ServiceWithSelfReturningT = struct {
+        value: u32 = 0,
+        name: []const u8 = "",
+
+        pub fn init(self: *@This()) @This() {
+            _ = self; // Could use current state if needed
+            return .{
+                .value = 999,
+                .name = "rebuilt",
+            };
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithSelfReturningT, .singleton);
+
+    const service = try container.resolve(ServiceWithSelfReturningT);
+
+    try std.testing.expectEqual(@as(u32, 999), service.value);
+    try std.testing.expectEqualStrings("rebuilt", service.name);
+}
+
+test "init with self pointer returning !T" {
+    const allocator = std.testing.allocator;
+
+    const ServiceWithSelfReturningErrorT = struct {
+        value: u32 = 0,
+
+        pub fn init(self: *@This()) !@This() {
+            const old_value = self.value;
+            return .{
+                .value = old_value + 100,
+            };
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithSelfReturningErrorT, .singleton);
+
+    const service = try container.resolve(ServiceWithSelfReturningErrorT);
+
+    // Default was 0, init added 100
+    try std.testing.expectEqual(@as(u32, 100), service.value);
+}
+
+test "init with self and allocator returning T" {
+    const allocator = std.testing.allocator;
+
+    const ServiceWithFullReturningT = struct {
+        buffer: []u8,
+        allocator_ref: std.mem.Allocator,
+
+        pub fn init(self: *@This(), alloc: std.mem.Allocator) @This() {
+            _ = self;
+            return .{
+                .buffer = alloc.alloc(u8, 50) catch &[_]u8{},
+                .allocator_ref = alloc,
+            };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            if (self.buffer.len > 0) {
+                self.allocator_ref.free(self.buffer);
+            }
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithFullReturningT, .singleton);
+
+    const service = try container.resolve(ServiceWithFullReturningT);
+
+    try std.testing.expectEqual(@as(usize, 50), service.buffer.len);
+}
+
+test "init with self and allocator returning !T" {
+    const allocator = std.testing.allocator;
+
+    const ServiceWithFullReturningErrorT = struct {
+        data: []u8,
+        allocator_ref: std.mem.Allocator,
+
+        pub fn init(self: *@This(), alloc: std.mem.Allocator) !@This() {
+            _ = self;
+            const data = try alloc.alloc(u8, 75);
+            return .{
+                .data = data,
+                .allocator_ref = alloc,
+            };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.allocator_ref.free(self.data);
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(ServiceWithFullReturningErrorT, .singleton);
+
+    const service = try container.resolve(ServiceWithFullReturningErrorT);
+
+    try std.testing.expectEqual(@as(usize, 75), service.data.len);
+}
+
+test "init with self pointer returning T with injected dependencies" {
+    const allocator = std.testing.allocator;
+
+    const Config = struct {
+        multiplier: u32 = 5,
+    };
+
+    const ServiceWithSelfReturningTAndDeps = struct {
+        config: Injected(Config),
+        value: u32 = 10,
+
+        pub fn init(self: *@This()) @This() {
+            // Note: dependencies are injected before init, so we can use them
+            const multiplied = self.value * self.config.get().multiplier;
+            return .{
+                .config = undefined, // Will be re-injected after
+                .value = multiplied,
+            };
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    try container.register(Config, .singleton);
+    try container.register(ServiceWithSelfReturningTAndDeps, .singleton);
+
+    const service = try container.resolve(ServiceWithSelfReturningTAndDeps);
+
+    // Default value 10 * multiplier 5 = 50
+    try std.testing.expectEqual(@as(u32, 50), service.value);
+    // Config should be re-injected
+    try std.testing.expectEqual(@as(u32, 5), service.config.get().multiplier);
+}
