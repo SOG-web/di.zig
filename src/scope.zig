@@ -77,7 +77,7 @@ pub const Scope = struct {
                     return scoped_entry.instance;
                 }
                 // For runtime resolution, we must use the factory
-                const instance = try entry.create_fn(self.container);
+                const instance = try entry.create_fn.?(self.container);
                 try self.scoped_instances.put(key, .{
                     .instance = instance,
                     .destroy_fn = entry.destroy_fn,
@@ -85,7 +85,7 @@ pub const Scope = struct {
                 return instance;
             },
             .transient => {
-                return try entry.create_fn(self.container);
+                return try entry.create_fn.?(self.container);
             },
         }
     }
@@ -116,11 +116,14 @@ pub const Scope = struct {
 
                 // Create new instance for this scope
                 // Use custom factory if registered, otherwise build manually
-                const instance: *T = if (entry.uses_custom_factory) blk: {
-                    const inst: *T = @ptrCast(@alignCast(try entry.create_fn(self.container)));
+                const instance: *T = if (entry.uses_custom_factory and !entry.instance_type) blk: {
+                    const inst: *T = @ptrCast(@alignCast(try entry.create_fn.?(self.container)));
                     // Inject Lazy/Injected fields even for custom factories
                     try self.injectFields(T, inst);
                     break :blk inst;
+                } else if (entry.instance_type) {
+                    const inst: *T = @ptrCast(@alignCast(entry.instance.?));
+                    return inst;
                 } else try self.buildScopedInstance(T);
 
                 try self.scoped_instances.put(name, .{
@@ -133,11 +136,14 @@ pub const Scope = struct {
             .transient => {
                 // Always create new instance
                 // Use custom factory if registered, otherwise build manually
-                return if (entry.uses_custom_factory) blk: {
-                    const inst: *T = @ptrCast(@alignCast(try entry.create_fn(self.container)));
+                return if (entry.uses_custom_factory and !entry.instance_type) {
+                    const inst: *T = @ptrCast(@alignCast(try entry.create_fn.?(self.container)));
                     // Inject Lazy/Injected fields even for custom factories
                     try self.injectFields(T, inst);
-                    break :blk inst;
+                    return inst;
+                } else if (entry.instance_type) {
+                    const instance: *T = @ptrCast(@alignCast(entry.instance.?));
+                    return instance;
                 } else try self.buildScopedInstance(T);
             },
         }

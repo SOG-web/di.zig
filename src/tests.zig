@@ -115,20 +115,24 @@ test "register existing instance" {
     const Config = struct {
         port: u16,
         host: []const u8,
+
+        pub fn init(port: u16, host: []const u8) @This() {
+            return .{
+                .port = port,
+                .host = host,
+            };
+        }
     };
 
     var container = Container.init(allocator);
     defer container.deinit();
 
-    var config = Config{
-        .port = 8080,
-        .host = "localhost",
-    };
+    var config = Config.init(8000, "localhost");
 
     try container.registerInstance(Config, &config);
 
     const resolved = try container.resolve(Config);
-    try std.testing.expectEqual(@as(u16, 8080), resolved.port);
+    try std.testing.expectEqual(@as(u16, 8000), resolved.port);
     try std.testing.expectEqualStrings("localhost", resolved.host);
     try std.testing.expectEqual(&config, resolved);
 }

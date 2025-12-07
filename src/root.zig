@@ -82,11 +82,12 @@ pub fn Injected(comptime T: type) type {
 
 /// Type-erased service entry stored at runtime
 const ServiceEntry = struct {
-    create_fn: *const fn (*Container) anyerror!*anyopaque,
+    create_fn: ?*const fn (*Container) anyerror!*anyopaque,
     destroy_fn: ?*const fn (std.mem.Allocator, *anyopaque) void,
     lifetime: Lifetime,
     instance: ?*anyopaque,
     uses_custom_factory: bool,
+    instance_type: bool = false,
 };
 
 /// Dependency Injection Container
@@ -214,11 +215,12 @@ pub const Container = struct {
         try self.injectFieldsInternal(T, instance);
 
         const entry = ServiceEntry{
-            .create_fn = &makeCreateFn(T).create,
+            .create_fn = null,
             .destroy_fn = null, // Don't destroy externally-provided instances
             .lifetime = .singleton,
             .instance = @ptrCast(instance),
-            .uses_custom_factory = true,
+            .uses_custom_factory = false,
+            .instance_type = true,
         };
         try self.services.put(name, entry);
     }
@@ -232,31 +234,6 @@ pub const Container = struct {
     /// Use this when you have multiple registrations of the same type.
     pub fn resolveNamed(self: *Container, comptime T: type, name: []const u8) !*T {
         return self.resolveNamedInternal(T, name, false);
-    }
-
-    /// Resolve a service by its string key (used by Resolver interface)
-    pub fn resolveByKey(self: *Container, key: []const u8) anyerror!*anyopaque {
-        const entry = self.services.getPtr(key) orelse return error.ServiceNotRegistered;
-
-        switch (entry.lifetime) {
-            .singleton => {
-                if (entry.instance) |ptr| {
-                    return ptr;
-                }
-                self.mutex.lock();
-                defer self.mutex.unlock();
-                if (entry.instance) |ptr| {
-                    return ptr;
-                }
-                const new = try entry.create_fn(self);
-                entry.instance = new;
-                return new;
-            },
-            .transient => {
-                return try entry.create_fn(self);
-            },
-            .scoped => return error.UseAScopedResolver,
-        }
     }
 
     /// Create a new scope for scoped lifetime services.
@@ -276,7 +253,7 @@ pub const Container = struct {
     }
 
     // Internal resolve by name that tracks whether we already hold the lock
-    fn resolveNamedInternal(self: *Container, comptime T: type, name: []const u8, already_locked: bool) !*T {
+    pub fn resolveNamedInternal(self: *Container, comptime T: type, name: []const u8, already_locked: bool) !*T {
         const entry = self.services.getPtr(name) orelse return error.ServiceNotRegistered;
 
         switch (entry.lifetime) {
@@ -300,23 +277,29 @@ pub const Container = struct {
                     return @ptrCast(@alignCast(ptr));
                 }
 
-                const new: *T = if (entry.uses_custom_factory) blk: {
-                    const instance: *T = @ptrCast(@alignCast(try entry.create_fn(self)));
+                const new: *T = if (entry.uses_custom_factory and !entry.instance_type) blk: {
+                    const inst: *T = @ptrCast(@alignCast(try entry.create_fn.?(self)));
                     // Inject Lazy/Injected fields even for custom factories
-                    try self.injectFieldsInternal(T, instance);
-                    break :blk instance;
+                    try self.injectFieldsInternal(T, inst);
+                    break :blk inst;
+                } else if (entry.instance_type) {
+                    // Instance was registered via registerInstance
+                    const instance: *T = @ptrCast(@alignCast(entry.instance.?));
+                    return instance;
                 } else try self.buildInstanceInternal(T);
                 entry.instance = @ptrCast(new);
                 return new;
             },
             .transient => {
-                const new: *T = if (entry.uses_custom_factory) blk: {
-                    const instance: *T = @ptrCast(@alignCast(try entry.create_fn(self)));
+                return if (entry.uses_custom_factory and !entry.instance_type) {
+                    const instance: *T = @ptrCast(@alignCast(try entry.create_fn.?(self)));
                     // Inject Lazy/Injected fields even for custom factories
                     try self.injectFieldsInternal(T, instance);
-                    break :blk instance;
+                    return instance;
+                } else if (entry.instance_type) {
+                    const instance: *T = @ptrCast(@alignCast(entry.instance.?));
+                    return instance;
                 } else try self.buildInstanceInternal(T);
-                return new;
             },
             .scoped => return error.UseAScopedResolver,
         }
@@ -437,7 +420,9 @@ pub const Container = struct {
                         if (is_error_union) try T.init(instance, self.allocator) else T.init(instance, self.allocator);
                     }
                 } else {
-                    @compileError("Unsupported init function signature for type: " ++ @typeName(T));
+                    // Unsupported init signature - skip calling init, just use defaults
+                    // This allows types with custom constructors to be used with registerInstance
+                    needs_reinjection = true;
                 }
             }
         } else {
@@ -453,7 +438,7 @@ pub const Container = struct {
         return instance;
     }
 
-    fn getDefaults(comptime T: type) T {
+    pub fn getDefaults(comptime T: type) T {
         const info = @typeInfo(T).@"struct";
 
         var result: T = undefined;
@@ -489,6 +474,31 @@ pub const Container = struct {
                     };
                 }
             }
+        }
+    }
+
+    /// Resolve a service by its string key (used by Resolver interface)
+    pub fn resolveByKey(self: *Container, key: []const u8) anyerror!*anyopaque {
+        const entry = self.services.getPtr(key) orelse return error.ServiceNotRegistered;
+
+        switch (entry.lifetime) {
+            .singleton => {
+                if (entry.instance) |ptr| {
+                    return ptr;
+                }
+                self.mutex.lock();
+                defer self.mutex.unlock();
+                if (entry.instance) |ptr| {
+                    return ptr;
+                }
+                const new = try entry.create_fn.?(self);
+                entry.instance = new;
+                return new;
+            },
+            .transient => {
+                return try entry.create_fn.?(self);
+            },
+            .scoped => return error.UseAScopedResolver,
         }
     }
 };
