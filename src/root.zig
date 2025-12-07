@@ -146,6 +146,13 @@ pub const Container = struct {
     /// Register a type with the container using automatic construction.
     /// The type's fields will be inspected and dependencies will be injected.
     pub fn register(self: *Container, comptime T: type, lifetime: Lifetime) !void {
+        comptime {
+            if (!canAutoBuild(T)) {
+                @compileError("Type '" ++ @typeName(T) ++ "' has an unsupported init signature for auto-building. " ++
+                    "Supported signatures: init(), init(*T), init(Allocator), init(*T, Allocator). " ++
+                    "Use registerFactory() or registerInstance() instead.");
+            }
+        }
         try self.registerNamed(T, @typeName(T), lifetime);
     }
 
@@ -162,6 +169,13 @@ pub const Container = struct {
     /// const s2 = try container.resolveNamed(MyService, "transient_service");
     /// ```
     pub fn registerNamed(self: *Container, comptime T: type, name: []const u8, lifetime: Lifetime) !void {
+        comptime {
+            if (!canAutoBuild(T)) {
+                @compileError("Type '" ++ @typeName(T) ++ "' has an unsupported init signature for auto-building. " ++
+                    "Supported signatures: init(), init(*T), init(Allocator), init(*T, Allocator). " ++
+                    "Use registerFactory() or registerInstance() instead.");
+            }
+        }
         const entry = ServiceEntry{
             .create_fn = &makeCreateFn(T).create,
             .destroy_fn = &makeDestroyFn(T).destroy,
@@ -339,6 +353,38 @@ pub const Container = struct {
         };
     }
 
+    // Comptime check if a type can be auto-built by the container
+    fn canAutoBuild(comptime T: type) bool {
+        const info = @typeInfo(T);
+        if (info != .@"struct") {
+            return false;
+        }
+
+        if (!@hasDecl(T, "init")) {
+            return true; // No init function means we can use defaults
+        }
+
+        const InitFn = @TypeOf(T.init);
+        const init_info = @typeInfo(InitFn);
+        if (init_info != .@"fn") {
+            return true; // init is not a function, skip it
+        }
+
+        const params = init_info.@"fn".params;
+
+        // Supported signatures:
+        // - init()
+        // - init(*T)
+        // - init(Allocator)
+        // - init(*T, Allocator)
+        if (params.len == 0) return true;
+        if (params.len == 1 and params[0].type == *T) return true;
+        if (params.len == 1 and params[0].type == std.mem.Allocator) return true;
+        if (params.len == 2 and params[0].type == *T and params[1].type == std.mem.Allocator) return true;
+
+        return false;
+    }
+
     // Internal: Generate a destroy function for type T
     fn makeDestroyFn(comptime T: type) type {
         return struct {
@@ -420,8 +466,10 @@ pub const Container = struct {
                         if (is_error_union) try T.init(instance, self.allocator) else T.init(instance, self.allocator);
                     }
                 } else {
-                    // Unsupported init signature - skip calling init, just use defaults
-                    // This allows types with custom constructors to be used with registerInstance
+                    // Unsupported init signature - skip calling init, just use defaults.
+                    // This path is reached for types registered via registerInstance/registerFactory
+                    // where the container doesn't auto-build. Types using register() are checked
+                    // at registration time via canAutoBuild().
                     needs_reinjection = true;
                 }
             }
