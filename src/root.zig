@@ -218,7 +218,7 @@ pub const Container = struct {
             .destroy_fn = null, // Don't destroy externally-provided instances
             .lifetime = .singleton,
             .instance = @ptrCast(instance),
-            .uses_custom_factory = false,
+            .uses_custom_factory = true,
         };
         try self.services.put(name, entry);
     }
