@@ -405,6 +405,64 @@ pub const Container = struct {
             @compileError("DI can only build structs, got: " ++ @typeName(T));
         }
 
+        // Check for init function and its signature to determine creation strategy automatically
+        comptime var is_factory = false;
+        comptime var is_error_union = false;
+        comptime var params_len = 0;
+
+        if (@hasDecl(T, "init")) {
+            const InitFn = @TypeOf(T.init);
+            const init_info = @typeInfo(InitFn);
+            if (init_info == .@"fn") {
+                const params = init_info.@"fn".params;
+                const ReturnType = init_info.@"fn".return_type.?;
+                const return_type_info = @typeInfo(ReturnType);
+                is_error_union = return_type_info == .error_union;
+                const PayloadType = if (is_error_union) return_type_info.error_union.payload else ReturnType;
+
+                // If it returns *T, we treat it as a factory that allocates itself
+                if (PayloadType == *T) {
+                    // Only treat as factory if signature matches what we can call
+                    if (params.len == 0) {
+                        is_factory = true;
+                        params_len = 0;
+                    } else if (params.len == 1 and params[0].type == std.mem.Allocator) {
+                        is_factory = true;
+                        params_len = 1;
+                    }
+                }
+            }
+        }
+
+        if (is_factory) {
+            var instance: *T = undefined;
+
+            // Check supported factory signatures for *T return
+            if (params_len == 0) {
+                instance = if (is_error_union) try T.init() else T.init();
+            } else {
+                // params_len == 1 and Allocator (checked above)
+                instance = if (is_error_union) try T.init(self.allocator) else T.init(self.allocator);
+            }
+
+            // Auto-destruction logic handling is tricky since we didn't allocate 'instance' ourselves directly.
+            // We rely on 'deinit' if present, or assume the allocator passed (if any) was used.
+            errdefer {
+                if (@hasDecl(T, "deinit")) {
+                    instance.deinit();
+                } else {
+                    // If we passed an allocator, we can try to destroy it.
+                    // But if it's init(), we don't know the allocator.
+                    // If the user's factory fails mid-way, it should clean itself up.
+                    // But we are handling error in 'injectFieldsInternal'.
+                    // For now, only call deinit if it exists.
+                }
+            }
+
+            try self.injectFieldsInternal(T, instance);
+            return instance;
+        }
+
         const instance = try self.allocator.create(T);
         errdefer self.allocator.destroy(instance);
 
@@ -424,10 +482,11 @@ pub const Container = struct {
 
                 // Check if return type is an error union
                 const return_type_info = @typeInfo(ReturnType);
-                const is_error_union = return_type_info == .error_union;
-                const PayloadType = if (is_error_union) return_type_info.error_union.payload else ReturnType;
+                const is_error_union_local = return_type_info == .error_union; // Use distinct name
+                const PayloadType = if (is_error_union_local) return_type_info.error_union.payload else ReturnType;
 
                 // Determine if it returns T (factory-style) or void
+                // Note: *T return is handled above in is_factory block
                 const returns_t = PayloadType == T;
 
                 // For init that takes *T, inject dependencies BEFORE init so they're accessible
@@ -438,32 +497,32 @@ pub const Container = struct {
 
                 if (params.len == 0) {
                     if (returns_t) {
-                        instance.* = if (is_error_union) try T.init() else T.init();
+                        instance.* = if (is_error_union_local) try T.init() else T.init();
                         needs_reinjection = true;
                     } else {
-                        if (is_error_union) try T.init() else T.init();
+                        if (is_error_union_local) try T.init() else T.init();
                     }
                 } else if (params.len == 1 and params[0].type == *T) {
                     if (returns_t) {
-                        instance.* = if (is_error_union) try T.init(instance) else T.init(instance);
+                        instance.* = if (is_error_union_local) try T.init(instance) else T.init(instance);
                         needs_reinjection = true;
                     } else {
-                        if (is_error_union) try T.init(instance) else T.init(instance);
+                        if (is_error_union_local) try T.init(instance) else T.init(instance);
                     }
                 } else if (params.len == 1 and params[0].type == std.mem.Allocator) {
                     if (returns_t) {
-                        instance.* = if (is_error_union) try T.init(self.allocator) else T.init(self.allocator);
+                        instance.* = if (is_error_union_local) try T.init(self.allocator) else T.init(self.allocator);
                     } else {
-                        if (is_error_union) try T.init(self.allocator) else T.init(self.allocator);
+                        if (is_error_union_local) try T.init(self.allocator) else T.init(self.allocator);
                     }
                     // Always inject after allocator-only init (no self access)
                     needs_reinjection = true;
                 } else if (params.len == 2 and params[0].type == *T and params[1].type == std.mem.Allocator) {
                     if (returns_t) {
-                        instance.* = if (is_error_union) try T.init(instance, self.allocator) else T.init(instance, self.allocator);
+                        instance.* = if (is_error_union_local) try T.init(instance, self.allocator) else T.init(instance, self.allocator);
                         needs_reinjection = true;
                     } else {
-                        if (is_error_union) try T.init(instance, self.allocator) else T.init(instance, self.allocator);
+                        if (is_error_union_local) try T.init(instance, self.allocator) else T.init(instance, self.allocator);
                     }
                 } else {
                     // Unsupported init signature - skip calling init, just use defaults.

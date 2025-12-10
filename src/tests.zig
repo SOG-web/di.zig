@@ -137,6 +137,37 @@ test "register existing instance" {
     try std.testing.expectEqual(&config, resolved);
 }
 
+test "register existing instance 2" {
+    const allocator = std.testing.allocator;
+
+    const Config = struct {
+        port: u16,
+        host: []const u8,
+
+        pub fn init(port: u16, host: []const u8) !*@This() {
+            const instance = try allocator.create(@This());
+            instance.* = .{
+                .port = port,
+                .host = host,
+            };
+            return instance;
+        }
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    const config = try Config.init(8000, "localhost");
+    defer allocator.destroy(config);
+
+    try container.registerInstance(Config, config);
+
+    const resolved = try container.resolve(Config);
+    try std.testing.expectEqual(@as(u16, 8000), resolved.port);
+    try std.testing.expectEqualStrings("localhost", resolved.host);
+    try std.testing.expectEqual(config, resolved);
+}
+
 test "custom factory" {
     const allocator = std.testing.allocator;
 
