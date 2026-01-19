@@ -226,7 +226,7 @@ pub const Container = struct {
     /// Register an existing instance as a singleton with a custom name.
     pub fn registerInstanceNamed(self: *Container, comptime T: type, name: []const u8, instance: *T) !void {
         // Inject Lazy/Injected fields into the provided instance
-        try self.injectFieldsInternal(T, instance);
+        try self.injectFieldsInternal(T, instance, false);
 
         const entry = ServiceEntry{
             .create_fn = null,
@@ -294,7 +294,7 @@ pub const Container = struct {
                 const new: *T = if (entry.uses_custom_factory and !entry.instance_type) blk: {
                     const inst: *T = @ptrCast(@alignCast(try entry.create_fn.?(self)));
                     // Inject Lazy/Injected fields even for custom factories
-                    try self.injectFieldsInternal(T, inst);
+                    try self.injectFieldsInternal(T, inst, true);
                     break :blk inst;
                 } else if (entry.instance_type) {
                     // Instance was registered via registerInstance
@@ -308,7 +308,7 @@ pub const Container = struct {
                 return if (entry.uses_custom_factory and !entry.instance_type) {
                     const instance: *T = @ptrCast(@alignCast(try entry.create_fn.?(self)));
                     // Inject Lazy/Injected fields even for custom factories
-                    try self.injectFieldsInternal(T, instance);
+                    try self.injectFieldsInternal(T, instance, false);
                     return instance;
                 } else if (entry.instance_type) {
                     const instance: *T = @ptrCast(@alignCast(entry.instance.?));
@@ -401,8 +401,14 @@ pub const Container = struct {
     // Internal: Build an instance of T, injecting dependencies
     fn buildInstanceInternal(self: *Container, comptime T: type) !*T {
         const info = @typeInfo(T);
-        if (info != .@"struct") {
+        if (info != .@"struct" and info != .@"union") {
             @compileError("DI can only build structs, got: " ++ @typeName(T));
+        }
+
+        if (info == .@"union") {
+            const instance: *T = undefined;
+            try self.injectFieldsInternal(T, instance, true);
+            return instance;
         }
 
         // Check for init function and its signature to determine creation strategy automatically
@@ -459,7 +465,7 @@ pub const Container = struct {
                 }
             }
 
-            try self.injectFieldsInternal(T, instance);
+            try self.injectFieldsInternal(T, instance, true);
             return instance;
         }
 
@@ -492,7 +498,7 @@ pub const Container = struct {
                 // For init that takes *T, inject dependencies BEFORE init so they're accessible
                 const takes_self = (params.len >= 1 and params[0].type == *T);
                 if (takes_self) {
-                    try self.injectFieldsInternal(T, instance);
+                    try self.injectFieldsInternal(T, instance, true);
                 }
 
                 if (params.len == 0) {
@@ -539,17 +545,21 @@ pub const Container = struct {
 
         // Inject/re-inject dependencies if needed
         if (needs_reinjection) {
-            try self.injectFieldsInternal(T, instance);
+            try self.injectFieldsInternal(T, instance, true);
         }
 
         return instance;
     }
 
     pub fn getDefaults(comptime T: type) T {
-        const info = @typeInfo(T).@"struct";
+        const info = @typeInfo(T);
+        if (info != .@"struct") {
+            @compileError("getDefaults can only be called on struct types");
+        }
+        const struct_info = info.@"struct";
 
         var result: T = undefined;
-        inline for (info.fields) |field| {
+        inline for (struct_info.fields) |field| {
             if (field.default_value_ptr) |default_ptr| {
                 const typed_ptr: *const field.type = @ptrCast(@alignCast(default_ptr));
                 @field(result, field.name) = typed_ptr.*;
@@ -558,28 +568,36 @@ pub const Container = struct {
         return result;
     }
 
-    fn injectFieldsInternal(self: *Container, comptime T: type, instance: *T) !void {
-        const info = @typeInfo(T).@"struct";
+    fn injectFieldsInternal(self: *Container, comptime T: type, instance: *T, already_locked: bool) !void {
+        const info = @typeInfo(T);
+        if (info == .@"struct") {
+            const struct_info = info.@"struct";
+            inline for (struct_info.fields) |field| {
+                const FieldType = field.type;
+                const field_info = @typeInfo(FieldType);
 
-        inline for (info.fields) |field| {
-            const FieldType = field.type;
-            const field_info = @typeInfo(FieldType);
-
-            if (field_info == .@"struct" and @hasDecl(FieldType, "Inner")) {
-                // Check for Lazy(X)
-                if (FieldType == Lazy(FieldType.Inner)) {
-                    @field(instance, field.name) = .{
-                        ._resolver = Resolver.fromContainer(self),
-                    };
+                if (field_info == .@"struct" and @hasDecl(FieldType, "Inner")) {
+                    // Check for Lazy(X)
+                    if (FieldType == Lazy(FieldType.Inner)) {
+                        @field(instance, field.name) = .{
+                            ._resolver = Resolver.fromContainer(self),
+                        };
+                    }
+                    // Check for Injected(X)
+                    else if (FieldType == Injected(FieldType.Inner)) {
+                        const dep = try self.resolveInternal(FieldType.Inner, already_locked);
+                        @field(instance, field.name) = .{
+                            .ptr = dep,
+                        };
+                    }
                 }
-                // Check for Injected(X)
-                else if (FieldType == Injected(FieldType.Inner)) {
-                    // Pass true to indicate we already hold the lock
-                    const dep = try self.resolveInternal(FieldType.Inner, true);
-                    @field(instance, field.name) = .{
-                        .ptr = dep,
-                    };
-                }
+            }
+        } else if (info == .@"union") {
+            // For unions, inject into the active payload
+            switch (instance.*) {
+                inline else => |*payload| {
+                    try self.injectFieldsInternal(@TypeOf(payload.*), payload, already_locked);
+                },
             }
         }
     }

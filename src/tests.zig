@@ -356,6 +356,66 @@ test "register instance with injected dependencies" {
     try std.testing.expectEqualStrings("[LOG]", lazy_logger.prefix);
 }
 
+test "union instance with injected dependencies" {
+    const allocator = std.testing.allocator;
+
+    const Logger = struct {
+        prefix: []const u8 = "[LOG]",
+    };
+
+    const UnionService = union(enum) {
+        a: struct {
+            logger: Injected(Logger),
+            value: u32,
+        },
+        b: struct {
+            lazy_logger: Lazy(Logger),
+            name: []const u8,
+        },
+    };
+
+    var container = Container.init(allocator);
+    defer container.deinit();
+
+    // Register the dependency
+    try container.register(Logger, .singleton);
+
+    // Create union instances
+    var service_a = UnionService{
+        .a = .{
+            .logger = undefined, // Will be injected
+            .value = 123,
+        },
+    };
+
+    var service_b = UnionService{
+        .b = .{
+            .lazy_logger = undefined, // Will be injected
+            .name = "test",
+        },
+    };
+
+    // Register the existing instances - should inject dependencies
+    try container.registerInstanceNamed(UnionService, "service_a", &service_a);
+    try container.registerInstanceNamed(UnionService, "service_b", &service_b);
+
+    // Resolve and verify
+    const resolved_a = try container.resolveNamed(UnionService, "service_a");
+    const resolved_b = try container.resolveNamed(UnionService, "service_b");
+
+    // Should be the same instances
+    try std.testing.expectEqual(&service_a, resolved_a);
+    try std.testing.expectEqual(&service_b, resolved_b);
+
+    // Check injected dependencies
+    try std.testing.expectEqual(@as(u32, 123), resolved_a.a.value);
+    try std.testing.expectEqualStrings("[LOG]", resolved_a.a.logger.get().prefix);
+
+    try std.testing.expectEqualStrings("test", resolved_b.b.name);
+    const lazy_logger = try resolved_b.b.lazy_logger.get();
+    try std.testing.expectEqualStrings("[LOG]", lazy_logger.prefix);
+}
+
 test "scoped services are shared within scope" {
     const allocator = std.testing.allocator;
 
